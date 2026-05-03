@@ -20,6 +20,10 @@ SCREENSHOT_1 = HERE / "Screenshot 2026-05-03 223422.png"
 SCREENSHOT_2 = HERE / "Screenshot 2026-05-03 225424.png"
 
 
+# ---------------------------------------------------------------------------
+# HTTP helpers
+# ---------------------------------------------------------------------------
+
 def _parse_response(raw: bytes) -> dict:
     try:
         return json.loads(raw)
@@ -43,34 +47,28 @@ def _post_json(path: str, payload: dict, timeout: int = 30) -> tuple[int, dict]:
 
 
 def _post_multipart(path: str, fields: dict, files: dict, timeout: int = 30) -> tuple[int, dict]:
-    """Encode and POST multipart/form-data. files = {name: (filename, data, mime)}."""
+    """POST multipart/form-data. files = {name: (filename, data, mime)}."""
     boundary = "----FormBoundary7MA4YWxkTrZu0gW"
-    body_parts = []
+    parts = []
 
     for name, value in fields.items():
-        body_parts.append(
-            f'--{boundary}\r\n'
-            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
-            f'{value}\r\n'
+        parts.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'
         )
-
     for name, (filename, data, mime) in files.items():
         header = (
             f'--{boundary}\r\n'
             f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
             f'Content-Type: {mime}\r\n\r\n'
         )
-        body_parts.append(header.encode() + data + b'\r\n')
+        parts.append(header.encode() + data + b"\r\n")
 
-    body_parts.append(f'--{boundary}--\r\n')
-
-    encoded = b"".join(
-        p.encode() if isinstance(p, str) else p for p in body_parts
-    )
+    parts.append(f"--{boundary}--\r\n")
+    body = b"".join(p.encode() if isinstance(p, str) else p for p in parts)
 
     req = urllib.request.Request(
         BASE_URL + path,
-        data=encoded,
+        data=body,
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         method="POST",
     )
@@ -134,7 +132,7 @@ class TestChatWithImage(unittest.TestCase):
             "/chat",
             fields={"message": "Describe what you see in this screenshot in one sentence."},
             files={"image": (SCREENSHOT_1.name, image_data, "image/png")},
-            timeout=90,
+            timeout=60,
         )
         self.assertEqual(status, 200, data)
         self.assertIn("reply", data)
@@ -146,7 +144,7 @@ class TestChatWithImage(unittest.TestCase):
             "/chat",
             fields={"message": "Describe what you see in this screenshot in one sentence."},
             files={"image": (SCREENSHOT_2.name, image_data, "image/png")},
-            timeout=90,
+            timeout=60,
         )
         self.assertEqual(status, 200, data)
         self.assertIn("reply", data)

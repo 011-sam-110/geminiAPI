@@ -1,2 +1,4 @@
 flask
-requests
+google-generativeai
+python-dotenv
+Pillow
