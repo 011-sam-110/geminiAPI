@@ -130,26 +130,51 @@ def _sapisid_hash(origin: str) -> str:
 
 
 def _upload_image(image_data: bytes, mime_type: str) -> str:
-    """Upload an image to Google's content service and return the image path."""
-    # Pass cookies explicitly — the session won't auto-send them to a different domain.
+    """Upload an image via Google's two-step resumable upload and return the image path."""
+    auth = _sapisid_hash("https://gemini.google.com")
+    # Cookies must be sent explicitly — different domain from gemini.google.com.
     cookie_header = "; ".join(
         f"{c.name}={c.value}" for c in gemini_session.cookies
     )
-    resp = gemini_session.post(
+    common = {
+        "Authorization": auth,
+        "Cookie": cookie_header,
+        "Origin": "https://gemini.google.com",
+        "Referer": "https://gemini.google.com/",
+    }
+
+    # Step 1: initiate — tells Google the upload size/type, gets back an upload URL.
+    r1 = requests.post(
         UPLOAD_URL,
         headers={
-            "X-Goog-Upload-Command": "start, upload, finalize",
+            **common,
+            "X-Goog-Upload-Protocol": "resumable",
+            "X-Goog-Upload-Command": "start",
             "X-Goog-Upload-Header-Content-Length": str(len(image_data)),
             "X-Goog-Upload-Header-Content-Type": mime_type,
+            "Content-Type": "application/json",
+        },
+        json={},
+        timeout=15,
+    )
+    r1.raise_for_status()
+    upload_url = r1.headers.get("X-Goog-Upload-URL", UPLOAD_URL)
+
+    # Step 2: send the image bytes to the returned upload URL.
+    r2 = requests.post(
+        upload_url,
+        headers={
+            **common,
             "X-Goog-Upload-Protocol": "resumable",
-            "Authorization": _sapisid_hash("https://gemini.google.com"),
-            "Cookie": cookie_header,
+            "X-Goog-Upload-Command": "upload, finalize",
+            "X-Goog-Upload-Offset": "0",
+            "Content-Type": mime_type,
         },
         data=image_data,
         timeout=45,
     )
-    resp.raise_for_status()
-    return resp.text.strip()
+    r2.raise_for_status()
+    return r2.text.strip()
 
 
 def _send(
