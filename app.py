@@ -20,11 +20,13 @@ Environment variables:
   GEMINI_COOKIES  — contents of a Netscape-format cookie file (required on Vercel)
 """
 
+import hashlib
 import http.cookiejar
 import json
 import os
 import re
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -116,8 +118,23 @@ def _ensure_initialized() -> None:
 # Gemini helpers
 # ---------------------------------------------------------------------------
 
+def _sapisid_hash(origin: str) -> str:
+    """Compute the SAPISIDHASH Authorization value required by Google upload APIs."""
+    sapisid = next(
+        (c.value for c in gemini_session.cookies if c.name in ("SAPISID", "__Secure-3PAPISID")),
+        "",
+    )
+    ts = str(int(time.time()))
+    digest = hashlib.sha1(f"{ts} {sapisid} {origin}".encode()).hexdigest()
+    return f"SAPISIDHASH {ts}_{digest}"
+
+
 def _upload_image(image_data: bytes, mime_type: str) -> str:
     """Upload an image to Google's content service and return the image path."""
+    # Pass cookies explicitly — the session won't auto-send them to a different domain.
+    cookie_header = "; ".join(
+        f"{c.name}={c.value}" for c in gemini_session.cookies
+    )
     resp = gemini_session.post(
         UPLOAD_URL,
         headers={
@@ -125,9 +142,11 @@ def _upload_image(image_data: bytes, mime_type: str) -> str:
             "X-Goog-Upload-Header-Content-Length": str(len(image_data)),
             "X-Goog-Upload-Header-Content-Type": mime_type,
             "X-Goog-Upload-Protocol": "resumable",
+            "Authorization": _sapisid_hash("https://gemini.google.com"),
+            "Cookie": cookie_header,
         },
         data=image_data,
-        timeout=30,
+        timeout=45,
     )
     resp.raise_for_status()
     return resp.text.strip()
