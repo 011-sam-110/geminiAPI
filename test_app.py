@@ -134,6 +134,7 @@ class TestChatWithImage(unittest.TestCase):
             "/chat",
             fields={"message": "Describe what you see in this screenshot in one sentence."},
             files={"image": (SCREENSHOT_1.name, image_data, "image/png")},
+            timeout=90,
         )
         self.assertEqual(status, 200, data)
         self.assertIn("reply", data)
@@ -145,6 +146,7 @@ class TestChatWithImage(unittest.TestCase):
             "/chat",
             fields={"message": "Describe what you see in this screenshot in one sentence."},
             files={"image": (SCREENSHOT_2.name, image_data, "image/png")},
+            timeout=90,
         )
         self.assertEqual(status, 200, data)
         self.assertIn("reply", data)
