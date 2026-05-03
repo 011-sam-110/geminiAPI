@@ -48,6 +48,13 @@ TINY_JPEG = bytes([
 ])
 
 
+def _parse_response(raw: bytes) -> dict:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {"_raw": raw.decode(errors="replace")}
+
+
 def _post_json(path: str, payload: dict, timeout: int = 30) -> tuple[int, dict]:
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
@@ -58,9 +65,9 @@ def _post_json(path: str, payload: dict, timeout: int = 30) -> tuple[int, dict]:
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, json.loads(r.read())
+            return r.status, _parse_response(r.read())
     except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read())
+        return e.code, _parse_response(e.read())
 
 
 def _post_multipart(path: str, fields: dict, files: dict, timeout: int = 30) -> tuple[int, dict]:
@@ -97,18 +104,18 @@ def _post_multipart(path: str, fields: dict, files: dict, timeout: int = 30) -> 
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, json.loads(r.read())
+            return r.status, _parse_response(r.read())
     except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read())
+        return e.code, _parse_response(e.read())
 
 
 def _delete(path: str, timeout: int = 10) -> tuple[int, dict]:
     req = urllib.request.Request(BASE_URL + path, method="DELETE")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, json.loads(r.read())
+            return r.status, _parse_response(r.read())
     except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read())
+        return e.code, _parse_response(e.read())
 
 
 # ---------------------------------------------------------------------------
