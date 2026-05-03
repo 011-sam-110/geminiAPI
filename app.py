@@ -15,11 +15,16 @@ Endpoints:
 
   DELETE /chat/<conversation_id>
     Clears a conversation so the next message starts fresh.
+
+Environment variables:
+  GEMINI_COOKIES  — contents of a Netscape-format cookie file (required on Vercel)
 """
 
 import http.cookiejar
 import json
+import os
 import re
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -30,9 +35,9 @@ from flask import Flask, jsonify, request
 # Config
 # ---------------------------------------------------------------------------
 
-COOKIE_FILE = Path(__file__).parent / "cookies.txt"
 BASE_URL = "https://gemini.google.com"
 STREAM_URL = f"{BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
+UPLOAD_URL = "https://content-push.googleapis.com/upload/"
 REQUEST_HEADERS = {
     "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
     "referer": "https://gemini.google.com/",
@@ -45,24 +50,39 @@ REQUEST_HEADERS = {
 }
 
 # ---------------------------------------------------------------------------
-# Gemini session (initialised once at startup)
+# Gemini session (lazily initialised on first request)
 # ---------------------------------------------------------------------------
 
-gemini_session: requests.Session
-at_token: str
-bl_token: str
+gemini_session: requests.Session | None = None
+at_token: str = ""
+bl_token: str = ""
 
 # In-memory conversation store: { conversation_id -> (conv_id, resp_id, choice_id) }
+# Note: this resets on cold starts in serverless environments.
 conversations: dict[str, tuple[str, str, str]] = {}
+
+
+def _cookie_file() -> Path:
+    """Return a path to a cookie file, writing from GEMINI_COOKIES env var if set."""
+    env_cookies = os.environ.get("GEMINI_COOKIES", "")
+    if env_cookies:
+        tmp = Path(tempfile.gettempdir()) / "gemini_cookies.txt"
+        tmp.write_text(env_cookies)
+        return tmp
+    return Path(__file__).parent / "cookies.txt"
 
 
 def init_gemini() -> None:
     global gemini_session, at_token, bl_token
 
-    if not COOKIE_FILE.exists():
-        raise FileNotFoundError(f"Cookie file not found: {COOKIE_FILE}")
+    cookie_file = _cookie_file()
+    if not cookie_file.exists():
+        raise FileNotFoundError(
+            "Cookie file not found. Set the GEMINI_COOKIES environment variable "
+            "to the contents of a Netscape-format cookie file."
+        )
 
-    jar = http.cookiejar.MozillaCookieJar(str(COOKIE_FILE))
+    jar = http.cookiejar.MozillaCookieJar(str(cookie_file))
     jar.load(ignore_discard=True, ignore_expires=True)
 
     gemini_session = requests.Session()
@@ -86,13 +106,45 @@ def init_gemini() -> None:
     print(f"Gemini session ready. build={bl_token}")
 
 
+def _ensure_initialized() -> None:
+    """Lazily initialise the Gemini session on the first request."""
+    if gemini_session is None:
+        init_gemini()
+
+
 # ---------------------------------------------------------------------------
 # Gemini helpers
 # ---------------------------------------------------------------------------
 
-def _send(message: str, conv_id: str, resp_id: str, choice_id: str) -> str:
+def _upload_image(image_data: bytes, mime_type: str) -> str:
+    """Upload an image to Google's content service and return the image path."""
+    resp = gemini_session.post(
+        UPLOAD_URL,
+        headers={
+            "X-Goog-Upload-Command": "start, upload, finalize",
+            "X-Goog-Upload-Header-Content-Length": str(len(image_data)),
+            "X-Goog-Upload-Header-Content-Type": mime_type,
+            "X-Goog-Upload-Protocol": "resumable",
+        },
+        data=image_data,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.text.strip()
+
+
+def _send(
+    message: str,
+    conv_id: str,
+    resp_id: str,
+    choice_id: str,
+    image_path: str = "",
+    mime_type: str = "",
+    filename: str = "",
+) -> str:
+    image_list = [[[image_path, 1, None, mime_type], filename]] if image_path else []
     inner = json.dumps([
-        [message, 0, None, [], None, None, 0],
+        [message, 0, None, image_list, None, None, 0],
         ["en-GB"],
         [conv_id, resp_id, choice_id],
     ])
@@ -150,18 +202,39 @@ app = Flask(__name__)
 
 @app.post("/chat")
 def chat():
-    body = request.get_json(silent=True) or {}
-    message = (body.get("message") or "").strip()
+    try:
+        _ensure_initialized()
+    except Exception as e:
+        return jsonify({"error": f"Initialisation failed: {e}"}), 503
+
+    if request.content_type and "multipart/form-data" in request.content_type:
+        message = (request.form.get("message") or "").strip()
+        convo_id = (request.form.get("conversation_id") or "").strip() or str(uuid.uuid4())
+    else:
+        body = request.get_json(silent=True) or {}
+        message = (body.get("message") or "").strip()
+        convo_id = (body.get("conversation_id") or "").strip() or str(uuid.uuid4())
 
     if not message:
         return jsonify({"error": "message is required"}), 400
 
+    image_path = mime_type = filename = ""
+    img_file = request.files.get("image")
+    if img_file:
+        try:
+            image_path = _upload_image(img_file.read(), img_file.mimetype or "image/jpeg")
+            mime_type = img_file.mimetype or "image/jpeg"
+            filename = img_file.filename or "image.jpg"
+        except requests.HTTPError as e:
+            return jsonify({"error": f"Image upload failed: {e.response.status_code}"}), 502
+        except requests.RequestException as e:
+            return jsonify({"error": f"Image upload failed: {e}"}), 502
+
     # Look up or create a conversation
-    convo_id = (body.get("conversation_id") or "").strip() or str(uuid.uuid4())
     conv_id, resp_id, choice_id = conversations.get(convo_id, ("", "", ""))
 
     try:
-        raw = _send(message, conv_id, resp_id, choice_id)
+        raw = _send(message, conv_id, resp_id, choice_id, image_path, mime_type, filename)
     except requests.HTTPError as e:
         return jsonify({"error": f"Gemini HTTP error: {e.response.status_code}"}), 502
     except requests.RequestException as e:
@@ -195,3 +268,6 @@ def clear_conversation(convo_id: str):
 if __name__ == "__main__":
     init_gemini()
     app.run(debug=True, port=5000)
+
+# Vercel looks for a module-level `app` variable — it's already defined above.
+
